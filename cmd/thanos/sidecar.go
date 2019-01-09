@@ -50,6 +50,8 @@ func registerSidecar(m map[string]setupFunc, app *kingpin.Application, name stri
 
 	objStoreConfig := regCommonObjStoreFlags(cmd, "", false)
 
+	uploadCompacted := cmd.Flag("shipper.upload-compacted-once", "[Experimental] If true sidecar will try to upload old compacted blocks as well (just once). Useful for migration purposes.").Hidden().Bool()
+
 	m[name] = func(g *run.Group, logger log.Logger, reg *prometheus.Registry, tracer opentracing.Tracer, _ bool) error {
 		rl := reloader.New(
 			log.With(logger, "component", "reloader"),
@@ -78,6 +80,7 @@ func registerSidecar(m map[string]setupFunc, app *kingpin.Application, name stri
 			peer,
 			rl,
 			name,
+			*uploadCompacted,
 		)
 	}
 }
@@ -98,6 +101,7 @@ func runSidecar(
 	peer cluster.Peer,
 	reloader *reloader.Reloader,
 	component string,
+	uploadCompacted bool,
 ) error {
 	var m = &promMetadata{
 		promURL: promURL,
@@ -259,7 +263,15 @@ func runSidecar(
 			defer runutil.CloseWithLogOnErr(logger, bkt, "bucket client")
 
 			return runutil.Repeat(30*time.Second, ctx.Done(), func() error {
-				s.Sync(ctx)
+				if uploadCompacted {
+					if _, err := s.SyncCompactedOnce(ctx); err != nil {
+						level.Warn(logger).Log("err", err)
+					}
+				}
+
+				if _, err := s.SyncNonCompacted(ctx); err != nil {
+					level.Warn(logger).Log("err", err)
+				}
 
 				minTime, _, err := s.Timestamps()
 				if err != nil {
